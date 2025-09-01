@@ -1,0 +1,144 @@
+# This GitHub Actions workflow automates the process of merging or rebasing a head branch onto a base branch.
+# It can be triggered manually and provides an option to choose between a merge or rebase operation.
+#
+# HOW TO USE:
+# 1. Go to the "Actions" tab of your GitHub repository.
+# 2. Select "AI-Powered Branch Synchronizer" from the list of workflows.
+# 3. Click the "Run workflow" dropdown button.
+# 4. Fill in the base branch, head branch, and select your strategy.
+# 5. Choose the Gemini model appropriate for your task.
+# 6. Click "Run workflow".
+
+name: AI-Powered Branch Synchronizer
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_branch:
+        description: 'The base branch (e.g., main, develop)'
+        required: true
+        default: 'main'
+        type: string
+      head_branch:
+        description: 'The head/feature branch to sync (e.g., feature/WIP)'
+        required: true
+        type: string
+      strategy:
+        description: 'The synchronization strategy'
+        required: true
+        default: 'rebase'
+        type: choice
+        options:
+          - rebase
+          - merge
+      gemini_model:
+        description: 'The Gemini model for conflict resolution'
+        required: true
+        default: 'gemini-2.5-flash-lite'
+        type: choice
+        options:
+          - gemini-2.5-flash
+          - gemini-2.5-pro
+          - gemini-2.0-flash
+          - gemini-2.0-flash-lite          
+
+permissions:
+  contents: write # Required to push changes back to the repository
+
+jobs:
+  synchronize-branch:
+    name: Sync with ${{ github.event.inputs.strategy }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v4
+        with:
+          # Fetch all history for all tags and branches, which is necessary for rebase
+          fetch-depth: 0
+          # Use a personal access token (PAT) with repo scope for push permissions
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Set up Git user
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Fetch latest changes from all branches
+        run: git fetch --all
+
+      - name: Switch to the head branch
+        run: git checkout ${{ github.event.inputs.head_branch }}
+
+      # =========================================================================================
+      # == STANDARD REBASE/MERGE LOGIC ==========================================================
+      # =========================================================================================
+      - name: Attempt Operation
+        id: attempt_sync
+        continue-on-error: true # This is crucial. It allows the workflow to proceed to the conflict resolution step on failure.
+        run: |
+          if [[ "${{ github.event.inputs.strategy }}" == "rebase" ]]; then
+            echo "Attempting to rebase ${{ github.event.inputs.head_branch }} onto ${{ github.event.inputs.base_branch }}..."
+            git rebase origin/${{ github.event.inputs.base_branch }}
+          else
+            echo "Attempting to merge ${{ github.event.inputs.base_branch }} into ${{ github.event.inputs.head_branch }}..."
+            git merge --no-ff origin/${{ github.event.inputs.base_branch }}
+          fi
+
+      # =========================================================================================
+      # == GEMINI API CONFLICT RESOLUTION =======================================================
+      # =========================================================================================
+      - name: Resolve Conflicts with Gemini API
+        id: resolve_conflicts
+        if: steps.attempt_sync.outcome == 'failure'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL_NAME: ${{ github.event.inputs.gemini_model }}
+        run: |
+          echo "Sync operation failed with a conflict. Engaging Gemini API for resolution..."
+          node ./scripts/resolve-conflicts-with-gemini.js
+          echo "Gemini script finished."
+
+      # =========================================================================================
+      # == CONTINUE AND PUSH CHANGES ============================================================
+      # =========================================================================================
+      - name: Continue Operation After AI Resolution
+        if: steps.resolve_conflicts.outcome == 'success'
+        run: |
+          echo "Conflicts were resolved by AI. Continuing the operation..."
+          if [[ "${{ github.event.inputs.strategy }}" == "rebase" ]]; then
+            git rebase --continue
+          else
+            # For merge, the `git add` in the script is enough. We just need to commit.
+            git commit -m "fix(merge): resolve conflicts with Gemini AI"
+          fi
+
+      - name: Push Changes
+        # This step runs if the initial attempt succeeded OR if the AI resolution succeeded.
+        if: steps.attempt_sync.outcome == 'success' || steps.resolve_conflicts.outcome == 'success'
+        run: |
+          echo "Pushing updated branch to origin..."
+          if [[ "${{ github.event.inputs.strategy }}" == "rebase" ]]; then
+            # A rebase rewrites history, so a force push is required.
+            git push --force-with-lease
+          else
+            # A merge just adds a new commit, so a standard push is fine.
+            git push
+          fi
+          
+      - name: Handle Unresolved Conflicts
+        if: steps.attempt_sync.outcome == 'failure' && steps.resolve_conflicts.outcome != 'success'
+        run: |
+          echo "::error::Merge conflicts were detected, and the Gemini API failed to resolve them. Please resolve the conflicts manually."
+          if [[ "${{ github.event.inputs.strategy }}" == "rebase" ]]; then
+            git rebase --abort
+          else
+            git merge --abort
+          fi
+          exit 1
+
