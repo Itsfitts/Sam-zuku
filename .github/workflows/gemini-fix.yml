@@ -34,13 +34,11 @@ on:
       gemini_model:
         description: 'The Gemini model for conflict resolution'
         required: true
-        default: 'gemini-2.5-flash-lite'
+        default: 'gemini-2.5-flash-preview-05-20'
         type: choice
         options:
-          - gemini-2.5-flash
-          - gemini-2.5-pro
-          - gemini-2.0-flash
-          - gemini-2.0-flash-lite          
+          - gemini-2.5-flash-preview-05-20
+          - gemini-1.5-pro-preview-0514
 
 permissions:
   contents: write # Required to push changes back to the repository
@@ -51,13 +49,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository with full history
+      - name: Checkout repository with full history and submodules
         uses: actions/checkout@v4
         with:
           # Fetch all history for all tags and branches, which is necessary for rebase
           fetch-depth: 0
           # Use a personal access token (PAT) with repo scope for push permissions
           token: ${{ secrets.GH_PAT }}
+          # Recursively fetch submodules
+          submodules: 'recursive'
 
       - name: Set up Git user
         run: |
@@ -132,7 +132,8 @@ jobs:
           fi
           
       - name: Handle Unresolved Conflicts
-        if: steps.attempt_sync.outcome == 'failure' && steps.resolve_conflicts.outcome != 'success'
+        # This now uses failure() to ensure it runs when the 'resolve_conflicts' step fails.
+        if: failure() && steps.attempt_sync.outcome == 'failure'
         run: |
           echo "::error::Merge conflicts were detected, and the Gemini API failed to resolve them. Please resolve the conflicts manually."
           if [[ "${{ github.event.inputs.strategy }}" == "rebase" ]]; then
