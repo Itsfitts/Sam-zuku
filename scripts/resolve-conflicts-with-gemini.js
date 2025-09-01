@@ -5,11 +5,12 @@
  *
  * It performs the following steps:
  * 1. Identifies all files with merge conflicts.
- * 2. For each file, it reads the content and extracts the conflicting blocks.
- * 3. It constructs a prompt for the Gemini API, providing the conflicting code sections.
- * 4. It calls the Gemini API to get a suggested resolution.
- * 5. It replaces the conflict block in the file with the AI's suggestion.
- * 6. The process is repeated for all conflicts in all files.
+ * 2. Checks if the conflicted path is a directory (submodule). If so, it skips it.
+ * 3. For each file, it reads the content and extracts the conflicting blocks.
+ * 4. It constructs a prompt for the Gemini API, providing the conflicting code sections.
+ * 5. It calls the Gemini API to get a suggested resolution.
+ * 6. It replaces the conflict block in the file with the AI's suggestion.
+ * 7. The process is repeated for all conflicts in all files.
  *
  * This script requires the GEMINI_API_KEY and GEMINI_MODEL_NAME environment variables to be set.
  */
@@ -17,10 +18,10 @@
 const { execSync } = require('child_process');
 const fs = require('fs').promises;
 const https = require('https');
+const path = require('path');
 
 // Configuration
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// Read the model from the environment variable, with a fallback to the flash model.
 const GEMINI_MODEL_NAME = process.env.GEMINI_MODEL_NAME || 'gemini-2.5-flash-preview-05-20';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_NAME}:generateContent`;
 const MAX_RETRIES = 3;
@@ -180,16 +181,30 @@ async function main() {
         return;
     }
 
-    console.log(`Found ${conflictedFiles.length} conflicted file(s):`);
+    console.log(`Found ${conflictedFiles.length} conflicted path(s):`);
     conflictedFiles.forEach(file => console.log(`- ${file}`));
+
+    let unresolvedSubmodules = false;
 
     try {
         for (const file of conflictedFiles) {
+            const stats = await fs.stat(file);
+            if (stats.isDirectory()) {
+                console.warn(`::warning::Conflict detected in submodule '${file}'. This script cannot resolve submodule conflicts. Please resolve it manually.`);
+                unresolvedSubmodules = true;
+                continue; // Skip to the next file
+            }
             await resolveConflictsInFile(file);
             // Stage the resolved file
             runCommand(`git add ${file}`);
         }
-        console.log("All conflicts resolved and files staged successfully.");
+
+        if (unresolvedSubmodules) {
+             console.error("::error::There are unresolved submodule conflicts that require manual intervention.");
+             process.exit(1); // Exit with an error to halt the workflow
+        }
+
+        console.log("All file conflicts resolved and staged successfully.");
     } catch (error) {
         console.error("An error occurred during conflict resolution:", error);
         process.exit(1);
